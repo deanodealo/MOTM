@@ -2,7 +2,6 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{db}/documents {
 
-    // 1. Sign in to admin.html once, copy the ID it shows you, paste it here, then deploy.
     function isAdmin() {
       return request.auth != null && request.auth.uid in ['3niqIyFDzJYDWuJrblcKc9lhzZj1'];
     }
@@ -51,11 +50,10 @@ service cloud.firestore {
         allow create: if isMember() && request.auth.uid == uid
           && matchDoc(mid).status == 'open'
           && request.time < matchDoc(mid).closesAt
-          && request.resource.data.keys().hasOnly(['playerId', 'comment', 'notOwn', 'at'])
+          && request.resource.data.keys().hasOnly(['playerId', 'comment', 'at'])
           && request.resource.data.playerId in matchDoc(mid).eligible
           && request.resource.data.comment is string
           && request.resource.data.comment.size() <= 140
-          && request.resource.data.notOwn == true
           && request.resource.data.at == request.time;
         allow read: if isAdmin() || (signedIn() && request.auth.uid == uid);
         allow delete: if isAdmin();

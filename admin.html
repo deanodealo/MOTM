@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex, nofollow">
 <meta name="theme-color" content="#2E7A4B">
-<title>Player of the Match admin</title>
+<title>Parents' Player of the Match admin</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏅</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -39,6 +39,7 @@ const face = (p, cls = 'face') => p && p.photo ? `<img class="${cls}" src="${p.p
   : `<span class="${cls} init">${esc(((p && p.firstName) || '?')[0])}</span>`;
 const byNum = l => l.slice().sort((a, b) => (parseInt(a.number) || 999) - (parseInt(b.number) || 999) || a.firstName.localeCompare(b.firstName));
 const parentUrl = () => new URL('./', location.href).href;
+const voteMessage = m => `Parents' Player of the Match v ${m.opponent}\nVote here: ${parentUrl()}\nTeam code: ${teamCode}\nVoting closes ${fmtClose(m.closesAt)}.`;
 const localInput = d => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 
 let tab = 'week', players = [], matches = [], teamName = '', teamCode = '', memberCount = null;
@@ -198,7 +199,7 @@ function settingsHTML() {
   return `<form class="panel" id="settings"><h2>Team</h2>
     <label class="lbl" for="tname">Team name</label><input id="tname" class="field" value="${esc(teamName)}" placeholder="e.g. FC Hanley U11 Sunday">
     <label class="lbl" for="tcode">Team code</label><input id="tcode" class="field" value="${esc(teamCode)}" autocapitalize="characters" spellcheck="false" minlength="4" required placeholder="e.g. HANLEY26">
-    <p class="muted" style="font-size:14px">Parents type this once per phone. Pin it in the group rather than putting it next to the link.</p>
+    <p class="muted" style="font-size:14px">Parents type this once per phone. It's included in the vote message you share.</p>
     <button class="btn primary wide">Save</button><p class="err" id="err" role="alert"></p></form>
   <div class="panel"><h2>Parents' link</h2><p><code>${esc(parentUrl())}</code></p><button class="btn wide" data-act="copylink">Copy link</button></div>
   <div class="panel"><h2>Phones with access</h2><p class="muted">${memberCount === null ? '<button class="btn small" data-act="countmembers">Count them</button>' : memberCount + ' phone' + (memberCount === 1 ? '' : 's') + ' have entered the code.'}</p>
@@ -242,7 +243,7 @@ async function reveal() {
   });
   Object.assign(m, { status: 'revealed', winner: { id: p.id, firstName: p.firstName }, winnerComments: keep });
   picking = null; render();
-  ask(`${esc(p.firstName)} is Player of the Match`, 'Parents will see it next time they open the link. Share the winner graphic to the group?', 'Share graphic', () => shareGraphic(m));
+  ask(`${esc(p.firstName)} is Parents' Player of the Match`, 'Parents will see it next time they open the link. Share the winner graphic to the group?', 'Share graphic', () => shareGraphic(m));
 }
 
 async function shareGraphic(m) {
@@ -252,19 +253,20 @@ async function shareGraphic(m) {
   const x = c.getContext('2d');
   for (let i = 0; i < 12; i++) { x.fillStyle = i % 2 ? '#297044' : '#2E7A4B'; x.fillRect(0, i * H / 12, W, H / 12 + 1); }
   x.textAlign = 'center'; x.fillStyle = '#fff';
-  x.font = '600 48px "Barlow Condensed", sans-serif'; x.globalAlpha = .85; x.fillText(teamName || '', W / 2, 130); x.globalAlpha = 1;
-  x.font = '700 96px "Barlow Condensed", sans-serif'; x.fillText('Player of the Match', W / 2, 240);
-  const cx = W / 2, cy = 640, r = 300;
+  x.font = '600 48px "Barlow Condensed", sans-serif'; x.globalAlpha = .85; x.fillText(teamName || '', W / 2, 110); x.globalAlpha = 1;
+  x.font = '600 64px "Barlow Condensed", sans-serif'; x.fillText("Parents'", W / 2, 195);
+  x.font = '700 96px "Barlow Condensed", sans-serif'; x.fillText('Player of the Match', W / 2, 285);
+  const cx = W / 2, cy = 665, r = 300;
   const g = x.createLinearGradient(cx - r, cy - r, cx + r, cy + r); g.addColorStop(0, '#F6CF63'); g.addColorStop(.5, '#E8A317'); g.addColorStop(1, '#B97C0A');
   x.fillStyle = g; x.beginPath(); x.arc(cx, cy, r + 22, 0, Math.PI * 2); x.fill();
   x.save(); x.beginPath(); x.arc(cx, cy, r, 0, Math.PI * 2); x.clip();
   if (p.photo) { const img = new Image(); img.src = p.photo; await img.decode(); x.drawImage(img, cx - r, cy - r, r * 2, r * 2); }
   else { x.fillStyle = '#1F5E3B'; x.fillRect(cx - r, cy - r, r * 2, r * 2); x.fillStyle = '#fff'; x.font = '700 300px "Barlow Condensed", sans-serif'; x.fillText((p.firstName || '?')[0], cx, cy + 105); }
   x.restore();
-  x.fillStyle = '#fff'; x.font = '700 150px "Barlow Condensed", sans-serif'; x.fillText(p.firstName || '', W / 2, 1120);
-  x.font = '500 54px "Barlow", sans-serif'; x.globalAlpha = .9; x.fillText('v ' + (m.opponent || ''), W / 2, 1200);
+  x.fillStyle = '#fff'; x.font = '700 150px "Barlow Condensed", sans-serif'; x.fillText(p.firstName || '', W / 2, 1145);
+  x.font = '500 54px "Barlow", sans-serif'; x.globalAlpha = .9; x.fillText('v ' + (m.opponent || ''), W / 2, 1225);
   const blob = await new Promise(res => c.toBlob(res, 'image/png'));
-  const file = new File([blob], `player-of-the-match-${(p.firstName || 'winner').toLowerCase()}.png`, { type: 'image/png' });
+  const file = new File([blob], `parents-player-of-the-match-${(p.firstName || 'winner').toLowerCase()}.png`, { type: 'image/png' });
   try { if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); return; } }
   catch (e) { if (e.name === 'AbortError') return; }
   const url = URL.createObjectURL(file), a = document.createElement('a'); a.href = url; a.download = file.name; document.body.appendChild(a); a.click(); a.remove();
@@ -303,7 +305,7 @@ document.addEventListener('click', async ev => {
     if (a === 'copyuid') return share(d.uid);
     if (a === 'copylink') return share(parentUrl());
     if (a === 'sharelink') { const m = matches[0];
-      return share(`Player of the Match v ${m.opponent}: vote here ${parentUrl()}\nVoting closes ${fmtClose(m.closesAt)}. Team code is in the pinned message.`); }
+      return share(voteMessage(m)); }
     if (a === 'pickwinner') return startPick();
     if (a === 'backpick') { picking = null; return render(); }
     if (a === 'reveal') return reveal();
@@ -332,7 +334,7 @@ document.addEventListener('submit', async ev => {
       const data = { opponent: opp, date: $('#date').value, closesAt: Timestamp.fromDate(closes), status: 'open', eligible, createdAt: serverTimestamp() };
       const ref = await addDoc(collection(db, 'matches'), data);
       matches.unshift({ id: ref.id, ...data }); render();
-      ask('Voting is open', 'Share the link in the parents\' group now?', 'Share the vote link', () => share(`Player of the Match v ${opp}: vote here ${parentUrl()}\nVoting closes ${fmtClose(data.closesAt)}. Team code is in the pinned message.`));
+      ask('Voting is open', 'Share the link in the parents\' group now?', 'Share the vote link', () => share(voteMessage(data)));
     }
     if (f.id === 'addp') {
       const name = $('#pname').value.trim(); if (!name) return;
