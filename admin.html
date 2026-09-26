@@ -248,10 +248,23 @@ async function reveal() {
 
 async function shareGraphic(m) {
   const p = P(m.winner.id) || m.winner;
+  const quotes = (m.winnerComments || []).filter(Boolean);
+  const shown = quotes.slice(0, 4);
   await document.fonts.ready;
-  const W = 1080, H = 1350, c = document.createElement('canvas'); c.width = W; c.height = H;
+  const W = 1080, PAD = 80, QW = W - PAD * 2 - 60, LH = 52;
+  const meas = document.createElement('canvas').getContext('2d');
+  meas.font = '500 40px "Barlow", sans-serif';
+  const wrap = t => { const words = ('\u201C' + t + '\u201D').split(/\s+/), lines = []; let line = '';
+    for (const w of words) { const test = line ? line + ' ' + w : w;
+      if (meas.measureText(test).width > QW && line) { lines.push(line); line = w; } else line = test; }
+    if (line) lines.push(line); return lines.slice(0, 4); };
+  const blocks = shown.map(wrap);
+  const quotesH = blocks.length ? 110 + blocks.reduce((t, l) => t + l.length * LH + 56, 0) + (quotes.length > shown.length ? 60 : 0) : 0;
+  const H = 1350 + quotesH + (blocks.length ? 40 : 0);
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
   const x = c.getContext('2d');
-  for (let i = 0; i < 12; i++) { x.fillStyle = i % 2 ? '#297044' : '#2E7A4B'; x.fillRect(0, i * H / 12, W, H / 12 + 1); }
+  const stripe = H / Math.ceil(H / 112);
+  for (let i = 0; i * stripe < H; i++) { x.fillStyle = i % 2 ? '#297044' : '#2E7A4B'; x.fillRect(0, i * stripe, W, stripe + 1); }
   x.textAlign = 'center'; x.fillStyle = '#fff';
   x.font = '600 48px "Barlow Condensed", sans-serif'; x.globalAlpha = .85; x.fillText(teamName || '', W / 2, 110); x.globalAlpha = 1;
   x.font = '600 64px "Barlow Condensed", sans-serif'; x.fillText("Parents'", W / 2, 195);
@@ -264,13 +277,34 @@ async function shareGraphic(m) {
   else { x.fillStyle = '#1F5E3B'; x.fillRect(cx - r, cy - r, r * 2, r * 2); x.fillStyle = '#fff'; x.font = '700 300px "Barlow Condensed", sans-serif'; x.fillText((p.firstName || '?')[0], cx, cy + 105); }
   x.restore();
   x.fillStyle = '#fff'; x.font = '700 150px "Barlow Condensed", sans-serif'; x.fillText(p.firstName || '', W / 2, 1145);
-  x.font = '500 54px "Barlow", sans-serif'; x.globalAlpha = .9; x.fillText('v ' + (m.opponent || ''), W / 2, 1225);
+  x.font = '500 54px "Barlow", sans-serif'; x.globalAlpha = .9; x.fillText('v ' + (m.opponent || ''), W / 2, 1225); x.globalAlpha = 1;
+  if (blocks.length) {
+    let y = 1350;
+    x.font = '700 60px "Barlow Condensed", sans-serif'; x.fillText('What the parents said', W / 2, y); y += 50;
+    x.textAlign = 'left';
+    for (const lines of blocks) {
+      const h = lines.length * LH + 36;
+      x.fillStyle = 'rgba(255,255,255,.95)'; x.beginPath();
+      if (x.roundRect) x.roundRect(PAD, y, W - PAD * 2, h, 22); else x.rect(PAD, y, W - PAD * 2, h);
+      x.fill();
+      x.fillStyle = '#E8A317'; x.fillRect(PAD, y + 14, 10, h - 28);
+      x.fillStyle = '#17261D'; x.font = '500 40px "Barlow", sans-serif';
+      lines.forEach((l, i) => x.fillText(l, PAD + 40, y + 18 + LH * (i + 1) - 12));
+      y += h + 20;
+    }
+    if (quotes.length > shown.length) { x.textAlign = 'center'; x.fillStyle = '#fff'; x.font = '500 38px "Barlow", sans-serif';
+      x.fillText(`+ ${quotes.length - shown.length} more on the vote page`, W / 2, y + 36); }
+  }
+  const text = `Parents' Player of the Match v ${m.opponent}: ${p.firstName}` +
+    (quotes.length ? `\n\nWhat the parents said:\n${quotes.map(q => '\u201C' + q + '\u201D').join('\n')}` : '') +
+    `\n\n${parentUrl()}`;
   const blob = await new Promise(res => c.toBlob(res, 'image/png'));
   const file = new File([blob], `parents-player-of-the-match-${(p.firstName || 'winner').toLowerCase()}.png`, { type: 'image/png' });
-  try { if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); return; } }
+  try { if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], text }); return; } }
   catch (e) { if (e.name === 'AbortError') return; }
   const url = URL.createObjectURL(file), a = document.createElement('a'); a.href = url; a.download = file.name; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
+  try { await navigator.clipboard.writeText(text); toast('Graphic saved and the message copied, ready to paste'); } catch (e) {}
 }
 
 async function resizePhoto(file) {
