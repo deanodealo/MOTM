@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#2E7A4B">
+<title>Player of the Match</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏅</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main id="app" class="view"><header class="top"><h1>Player of the Match</h1></header><p class="muted">Loading…</p></main>
+
+<script type="module">
+import { firebaseConfig } from './firebase-config.js';
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+import { getAuth, signInAnonymously, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+import { getFirestore, doc, getDoc, setDoc, getDocs, collection, query, orderBy, limit, serverTimestamp }
+  from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const view = h => { $('#app').innerHTML = h; };
+const fmtClose = ts => ts.toDate().toLocaleString('en-GB', { weekday: 'long', hour: 'numeric', minute: '2-digit' });
+const fmtDate = s => s ? new Date(s + 'T12:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }) : '';
+const face = (p, cls = 'face') => p && p.photo
+  ? `<img class="${cls}" src="${p.photo}" alt="">`
+  : `<span class="${cls} init">${esc(((p && p.firstName) || '?')[0])}</span>`;
+
+let uid = null, teamName = '', match = null, players = [], pick = null, booted = false;
+
+function top() {
+  return `<header class="top">${teamName ? `<p class="team">${esc(teamName)}</p>` : ''}<h1>Player of the Match</h1>
+    ${match ? `<p class="fx">v ${esc(match.opponent)}${match.date ? ', ' + fmtDate(match.date) : ''}</p>` : ''}</header>`;
+}
+function fail(msg) {
+  view(`${top()}<div class="panel center"><h2>Can't load the vote</h2><p class="muted">${esc(msg)}</p>
+    <button class="btn primary" onclick="location.reload()">Try again</button></div>`);
+}
+
+onAuthStateChanged(auth, async user => {
+  if (!user) {
+    try { await signInAnonymously(auth); } catch (e) { fail('Check your signal and try again.'); }
+    return;
+  }
+  if (booted) return;
+  booted = true; uid = user.uid;
+  let member = null;
+  try { member = await getDoc(doc(db, 'members', uid)); } catch (e) { return fail('Check your signal and try again.'); }
+  if (!member.exists()) showJoin(); else load();
+});
+
+/* ---------- team code ---------- */
+function showJoin() {
+  view(`${top()}<form id="join" class="panel">
+    <h2>Enter the team code</h2>
+    <p class="muted" style="margin:6px 0 0">It's pinned in the parents' WhatsApp group. You only need it once on this phone.</p>
+    <label class="lbl" for="code">Team code</label>
+    <input id="code" class="field" autocomplete="off" autocapitalize="characters" spellcheck="false" required>
+    <button class="btn primary wide" style="margin-top:12px">Continue</button>
+    <p class="err" id="err" role="alert"></p></form>`);
+  $('#join').addEventListener('submit', async e => {
+    e.preventDefault();
+    const code = $('#code').value.trim().toUpperCase();
+    const btn = e.target.querySelector('button'); btn.disabled = true; $('#err').textContent = '';
+    try {
+      await setDoc(doc(db, 'members', uid), { code, joinedAt: serverTimestamp() });
+      load();
+    } catch (err) {
+      btn.disabled = false;
+      $('#err').textContent = err.code === 'permission-denied'
+        ? "That code isn't right. Check the pinned message in the group."
+        : "Couldn't check the code. Check your signal and try again.";
+    }
+  });
+}
+
+/* ---------- load + route ---------- */
+async function load() {
+  try {
+    const [team, ms, ps] = await Promise.all([
+      getDoc(doc(db, 'config', 'team')),
+      getDocs(query(collection(db, 'matches'), orderBy('createdAt', 'desc'), limit(1))),
+      getDocs(collection(db, 'players'))
+    ]);
+    teamName = team.exists() ? (team.data().name || '') : '';
+    players = ps.docs.map(d => ({ id: d.id, ...d.data() }));
+    match = ms.empty ? null : { id: ms.docs[0].id, ...ms.docs[0].data() };
+  } catch (e) { return fail('Check your signal and try again.'); }
+  route();
+}
+
+async function route() {
+  if (!match) {
+    return view(`${top()}<div class="panel center"><h2>No vote open yet</h2>
+      <p class="muted">Voting opens after the match. Use the link again when it goes in the group.</p></div>`);
+  }
+  if (match.status === 'revealed') return showReveal();
+  const open = match.status === 'open' && match.closesAt && match.closesAt.toMillis() > Date.now();
+  if (!open) {
+    return view(`${top()}<div class="panel center"><h2>Voting has closed</h2>
+      <p class="muted">The winner will be revealed here soon.</p></div>`);
+  }
+  let mine = null;
+  try { mine = await getDoc(doc(db, 'matches', match.id, 'votes', uid)); } catch (e) {}
+  if (mine && mine.exists()) return showVoted(mine.data().playerId);
+  showVote();
+}
+
+/* ---------- ballot ---------- */
+function showVote() {
+  const ballot = (match.eligible || []).map(id => players.find(p => p.id === id)).filter(Boolean)
+    .sort((a, b) => (parseInt(a.number) || 999) - (parseInt(b.number) || 999) || a.firstName.localeCompare(b.firstName));
+  view(`${top()}
+    <p class="lead">Tap the player you think was best today. Voting closes ${esc(fmtClose(match.closesAt))}.</p>
+    <div class="grid" id="grid">${ballot.map(p => `<button class="card" data-pick="${p.id}" aria-pressed="false">
+      ${p.number ? `<span class="no">${esc(p.number)}</span>` : ''}${face(p)}<span class="nm">${esc(p.firstName)}</span></button>`).join('')}</div>
+    <form class="panel" id="vote" hidden>
+      <label class="lbl" for="comment" style="margin-top:0">What did he do well? <span class="muted" style="font-family:var(--body);font-weight:400;font-size:14px">(optional)</span><span class="count" id="count">0/140</span></label>
+      <textarea id="comment" class="field" maxlength="140" placeholder="Brilliant block in the second half"></textarea>
+      <label class="check"><input type="checkbox" id="notOwn"><span>I'm not voting for my own child</span></label>
+      <button class="btn gold wide" id="send" disabled>Vote</button>
+      <p class="err" id="err" role="alert"></p>
+    </form>`);
+  $('#grid').addEventListener('click', e => {
+    const c = e.target.closest('[data-pick]'); if (!c) return;
+    pick = c.dataset.pick;
+    document.querySelectorAll('[data-pick]').forEach(b => b.setAttribute('aria-pressed', b === c));
+    $('#vote').hidden = false; updateSend();
+    $('#vote').scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'nearest' });
+  });
+  $('#comment').addEventListener('input', e => { $('#count').textContent = e.target.value.length + '/140'; });
+  $('#notOwn').addEventListener('change', updateSend);
+  $('#vote').addEventListener('submit', async e => {
+    e.preventDefault();
+    if (!pick || !$('#notOwn').checked) return;
+    const btn = $('#send'); btn.disabled = true; btn.textContent = 'Sending…'; $('#err').textContent = '';
+    try {
+      await setDoc(doc(db, 'matches', match.id, 'votes', uid), {
+        playerId: pick, comment: $('#comment').value.trim().slice(0, 140), notOwn: true, at: serverTimestamp()
+      });
+      showVoted(pick);
+    } catch (err) {
+      updateSend();
+      $('#err').textContent = err.code === 'permission-denied'
+        ? 'Voting closed before your vote arrived, or this phone has already voted.'
+        : "Your vote didn't send. Check your signal and try again.";
+    }
+  });
+}
+function updateSend() {
+  const p = players.find(x => x.id === pick), btn = $('#send');
+  btn.disabled = !(p && $('#notOwn').checked);
+  btn.textContent = p ? `Vote for ${p.firstName}` : 'Vote';
+}
+
+function showVoted(pid) {
+  const p = players.find(x => x.id === pid);
+  view(`${top()}<div class="panel center"><div class="tick" aria-hidden="true">✓</div>
+    <h2>Your vote for ${esc(p ? p.firstName : 'your player')} is in</h2>
+    <p class="muted">The winner is revealed here after voting closes ${esc(fmtClose(match.closesAt))}.</p></div>`);
+}
+
+/* ---------- reveal ---------- */
+function showReveal() {
+  const w = match.winner || {};
+  const p = players.find(x => x.id === w.id) || { firstName: w.firstName };
+  const quotes = (match.winnerComments || []).filter(Boolean);
+  view(`${top()}<section class="reveal">
+      <div class="medal">${face(p, 'big')}</div>
+      <p class="kicker">Player of the Match</p>
+      <h2 class="wn">${esc(p.firstName || w.firstName || '')}</h2>
+    </section>
+    ${quotes.length ? `<h3>What the parents said</h3><ul class="quotes">${quotes.map(q => `<li>${esc(q)}</li>`).join('')}</ul>` : ''}
+    <p class="muted center" style="margin-top:22px">Well played to the whole team.</p>`);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,65 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{db}/documents {
+
+    // 1. Sign in to admin.html once, copy the ID it shows you, paste it here, then deploy.
+    function isAdmin() {
+      return request.auth != null && request.auth.uid in ['PASTE_YOUR_ADMIN_UID'];
+    }
+    function signedIn() { return request.auth != null; }
+    function isMember() {
+      return signedIn() && exists(/databases/$(db)/documents/members/$(request.auth.uid));
+    }
+    function teamCode() {
+      return get(/databases/$(db)/documents/private/settings).data.code;
+    }
+    function matchDoc(mid) {
+      return get(/databases/$(db)/documents/matches/$(mid)).data;
+    }
+
+    // Team code: admin only. Parents never read it; rules check it for them.
+    match /private/{doc} {
+      allow read, write: if isAdmin();
+    }
+
+    // A phone becomes a member by entering the right team code once.
+    match /members/{uid} {
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['code', 'joinedAt'])
+        && request.resource.data.code == teamCode()
+        && request.resource.data.joinedAt == request.time;
+      allow read: if (signedIn() && request.auth.uid == uid) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /config/{doc} {
+      allow read: if isMember() || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /players/{id} {
+      allow read: if isMember() || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /matches/{mid} {
+      allow read: if isMember() || isAdmin();
+      allow write: if isAdmin();
+
+      // One vote per phone per match, only while open, only for players on the ballot.
+      match /votes/{uid} {
+        allow create: if isMember() && request.auth.uid == uid
+          && matchDoc(mid).status == 'open'
+          && request.time < matchDoc(mid).closesAt
+          && request.resource.data.keys().hasOnly(['playerId', 'comment', 'notOwn', 'at'])
+          && request.resource.data.playerId in matchDoc(mid).eligible
+          && request.resource.data.comment is string
+          && request.resource.data.comment.size() <= 140
+          && request.resource.data.notOwn == true
+          && request.resource.data.at == request.time;
+        allow read: if isAdmin() || (signedIn() && request.auth.uid == uid);
+        allow delete: if isAdmin();
+      }
+    }
+  }
+}

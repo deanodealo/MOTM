@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#2E7A4B">
+<title>Player of the Match admin</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏅</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main id="app" class="view"><header class="top"><h1>Admin</h1></header><p class="muted">Loading…</p></main>
+<div id="sheet"></div>
+<input type="file" id="photoFile" accept="image/*" hidden>
+
+<script type="module">
+import { firebaseConfig } from './firebase-config.js';
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut }
+  from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+import { getFirestore, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, getDocs, collection, query, orderBy,
+  serverTimestamp, Timestamp, getCountFromServer, writeBatch, deleteField }
+  from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const view = h => { $('#app').innerHTML = h; };
+const fmtClose = ts => ts.toDate().toLocaleString('en-GB', { weekday: 'long', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+const fmtDate = s => s ? new Date(s + 'T12:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }) : '';
+const face = (p, cls = 'face') => p && p.photo ? `<img class="${cls}" src="${p.photo}" alt="">`
+  : `<span class="${cls} init">${esc(((p && p.firstName) || '?')[0])}</span>`;
+const byNum = l => l.slice().sort((a, b) => (parseInt(a.number) || 999) - (parseInt(b.number) || 999) || a.firstName.localeCompare(b.firstName));
+const parentUrl = () => new URL('./', location.href).href;
+const localInput = d => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+
+let tab = 'week', players = [], matches = [], teamName = '', teamCode = '', memberCount = null;
+let picking = null;      // { tally:[{id,votes}], chosen, comments:{} }
+let pending = null, photoFor = null;
+
+/* ---------- sheets ---------- */
+function sheet(html) { $('#sheet').innerHTML = `<div class="sheet" data-close="1"><div class="panel" role="dialog" aria-modal="true">${html}</div></div>`; }
+function closeSheet() { $('#sheet').innerHTML = ''; }
+function ask(title, body, ok, fn, danger) {
+  pending = fn;
+  sheet(`<h2>${title}</h2>${body ? `<p class="muted">${body}</p>` : ''}<div class="row" style="margin-top:12px">
+    <button class="btn grow ${danger ? 'danger' : 'primary'}" data-act="ok">${ok}</button><button class="btn grow" data-close="1">Cancel</button></div>`);
+}
+function toast(msg) { sheet(`<h2 style="margin-bottom:12px">${esc(msg)}</h2><button class="btn wide" data-close="1">OK</button>`); }
+
+/* ---------- auth ---------- */
+onAuthStateChanged(auth, async user => {
+  if (!user || user.isAnonymous) return showSignIn();
+  try {
+    const s = await getDoc(doc(db, 'private', 'settings'));
+    teamCode = s.exists() ? (s.data().code || '') : '';
+  } catch (e) {
+    return view(`<header class="top"><h1>Admin</h1></header><div class="panel">
+      <h2>Nearly there</h2><p>You're signed in, but this account isn't the admin in the security rules yet.
+      Put this ID into <code>firestore.rules</code> where it says PASTE_YOUR_ADMIN_UID, then deploy the rules:</p>
+      <p><code>${esc(user.uid)}</code></p>
+      <div class="row"><button class="btn grow" data-act="copyuid" data-uid="${esc(user.uid)}">Copy ID</button><button class="btn grow" data-act="signout">Sign out</button></div></div>`);
+  }
+  await loadAll();
+  if (!teamCode) tab = 'settings';
+  render();
+});
+
+function showSignIn() {
+  view(`<header class="top"><h1>Admin</h1></header><form id="signin" class="panel">
+    <label class="lbl" for="em" style="margin-top:0">Email</label><input id="em" type="email" class="field" autocomplete="username" required>
+    <label class="lbl" for="pw">Password</label><input id="pw" type="password" class="field" autocomplete="current-password" required>
+    <button class="btn primary wide" style="margin-top:14px">Sign in</button><p class="err" id="err" role="alert"></p></form>`);
+  $('#signin').addEventListener('submit', async e => {
+    e.preventDefault(); $('#err').textContent = '';
+    try { await signInWithEmailAndPassword(auth, $('#em').value.trim(), $('#pw').value); }
+    catch (err) { $('#err').textContent = 'Email or password not recognised.'; }
+  });
+}
+
+/* ---------- data ---------- */
+async function loadAll() {
+  const [ps, ms, t] = await Promise.all([
+    getDocs(collection(db, 'players')),
+    getDocs(query(collection(db, 'matches'), orderBy('createdAt', 'desc'))),
+    getDoc(doc(db, 'config', 'team'))
+  ]);
+  players = ps.docs.map(d => ({ id: d.id, ...d.data() }));
+  matches = ms.docs.map(d => ({ id: d.id, ...d.data() }));
+  teamName = t.exists() ? (t.data().name || '') : '';
+}
+const P = id => players.find(p => p.id === id);
+function awards() {
+  const a = {};
+  matches.forEach(m => { if (m.status === 'revealed' && m.winner) a[m.winner.id] = (a[m.winner.id] || 0) + 1; });
+  return a;
+}
+
+/* ---------- render ---------- */
+function render() {
+  const tabs = [['week', 'Vote'], ['players', 'Players'], ['season', 'Season'], ['settings', 'Settings']];
+  const head = `<header class="top"><p class="team">${esc(teamName || 'Your team')}</p><h1>Admin</h1></header>
+    <nav class="tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" ${tab === k ? 'aria-current="page"' : ''}>${l}</button>`).join('')}</nav>`;
+  view(head + { week: weekHTML, players: playersHTML, season: seasonHTML, settings: settingsHTML }[tab]());
+  if (tab === 'week') refreshCount();
+}
+
+function weekHTML() {
+  const m = matches[0];
+  if (!teamCode) return `<div class="note">Set a team code in Settings before you share the link with parents.</div>` + newVoteHTML();
+  if (m && m.status === 'open') {
+    if (picking) return pickHTML(m);
+    const closed = m.closesAt.toMillis() <= Date.now();
+    return `<div class="panel"><h2>v ${esc(m.opponent)}</h2>
+      <p class="muted" style="margin:4px 0 12px">${fmtDate(m.date)}. ${closed ? 'Voting closed' : 'Closes'} ${esc(fmtClose(m.closesAt))}.</p>
+      <p style="font-family:var(--cond);font-size:26px;font-weight:700;margin:0" id="votes">Counting votes…</p>
+      <div style="display:grid;gap:8px;margin-top:14px">
+        <button class="btn" data-act="sharelink">Share the vote link</button>
+        <button class="btn gold" data-act="pickwinner">${closed ? 'Pick the winner' : 'Close voting and pick the winner'}</button>
+        <button class="btn danger" data-act="cancelvote">Cancel this vote</button></div></div>`;
+  }
+  let last = '';
+  if (m && m.status === 'revealed') {
+    const w = P(m.winner.id) || m.winner;
+    last = `<div class="panel row">${face(w)}<div class="grow"><strong style="font-family:var(--cond);font-size:20px">${esc(w.firstName)}</strong>
+      <div class="muted">Last winner, v ${esc(m.opponent)}</div></div><button class="btn small" data-act="graphic">Share graphic</button></div>`;
+  }
+  return last + newVoteHTML();
+}
+
+function newVoteHTML() {
+  const squad = byNum(players.filter(p => p.active !== false));
+  const t = new Date(); t.setDate(t.getDate() + 1); t.setHours(20, 0, 0, 0);
+  if (squad.length < 2) return `<div class="panel center"><h2>Add your players first</h2><p class="muted">The ballot needs at least two players.</p>
+    <button class="btn primary" data-tab="players">Add players</button></div>`;
+  return `<form class="panel" id="newvote"><h2>Open this week's vote</h2>
+    <label class="lbl" for="opp">Opponent</label><input id="opp" class="field" required placeholder="e.g. Norton United">
+    <div class="row"><div class="grow"><label class="lbl" for="date">Match date</label><input id="date" type="date" class="field" value="${new Date().toISOString().slice(0, 10)}"></div>
+      <div class="grow"><label class="lbl" for="closes">Voting closes</label><input id="closes" type="datetime-local" class="field" value="${localInput(t)}"></div></div>
+    <label class="lbl">On the ballot <span class="muted" style="font-family:var(--body);font-weight:400;font-size:14px">(tap to leave someone out)</span></label>
+    <div class="chips" id="elig">${squad.map(p => `<button type="button" class="chip" data-elig="${p.id}" aria-pressed="true">${esc(p.firstName)}</button>`).join('')}</div>
+    <button class="btn primary wide" style="margin-top:16px">Open voting</button><p class="err" id="err" role="alert"></p></form>`;
+}
+
+function pickHTML(m) {
+  const a = awards(), top = picking.tally[0] ? picking.tally[0].votes : 0;
+  const tied = picking.tally.filter(t => t.votes === top && top > 0).length > 1;
+  const chosen = picking.chosen;
+  const cs = chosen ? (picking.comments[chosen] || []) : [];
+  return `<div class="panel"><h2>Pick the winner, v ${esc(m.opponent)}</h2>
+    <p class="muted" style="margin:4px 0 12px">${picking.total} vote${picking.total === 1 ? '' : 's'}. Only you see these numbers.${tied ? ' It\'s a tie: tap who gets it. Awards so far this season are shown to help.' : ''}</p>
+    ${picking.total ? `<div class="tally">${picking.tally.filter(t => t.votes > 0).map(t => { const p = P(t.id) || { firstName: '?' };
+      return `<button data-choose="${t.id}" aria-pressed="${chosen === t.id}">${face(p)}<span><strong>${esc(p.firstName)}</strong><br><span class="muted" style="font-size:13px">${a[t.id] || 0} award${(a[t.id] || 0) === 1 ? '' : 's'} so far</span></span><span class="v">${t.votes}</span></button>`; }).join('')}</div>`
+      : '<p>No votes came in. You can still choose a winner below.</p>'}
+    ${!picking.total ? `<select class="field" id="manual"><option value="">Choose a player</option>${byNum(players.filter(p => (m.eligible || []).includes(p.id))).map(p => `<option value="${p.id}" ${chosen === p.id ? 'selected' : ''}>${esc(p.firstName)}</option>`).join('')}</select>` : ''}
+    ${chosen ? `<h3>Comments to show parents</h3>${cs.length ? `<p class="muted" style="margin:0 0 8px">Untick anything you'd rather not publish.</p>
+      ${cs.map((c, i) => `<label class="check"><input type="checkbox" data-cm="${i}" checked><span>${esc(c)}</span></label>`).join('')}` : '<p class="muted">No comments for this player.</p>'}` : ''}
+    <div style="display:grid;gap:8px;margin-top:14px">
+      <button class="btn gold" data-act="reveal" ${chosen ? '' : 'disabled'}>Reveal ${chosen ? esc(P(chosen).firstName) : 'the winner'} to parents</button>
+      <button class="btn" data-act="backpick">Back</button></div></div>`;
+}
+
+function playersHTML() {
+  const list = byNum(players);
+  return `<p class="muted">First names only. Add a photo only when you have that parent's consent. Without one, the player shows as their initial.</p>
+    ${list.length ? `<div class="list">${list.map(p => `<div class="item ${p.active === false ? 'off' : ''}">${face(p)}
+      <div><input class="nmi" value="${esc(p.firstName)}" data-edit="firstName" data-id="${p.id}" aria-label="First name">
+        <input class="numi" value="${esc(p.number || '')}" data-edit="number" data-id="${p.id}" placeholder="Shirt no." inputmode="numeric" aria-label="Shirt number"></div>
+      <div class="acts">
+        <button class="tg" data-consent="${p.id}" aria-pressed="${!!p.consent}">Photo consent</button>
+        <button class="tg" data-photo="${p.id}" ${p.consent ? '' : 'disabled'}>${p.photo ? 'Change photo' : 'Add photo'}</button>
+        <button class="tg" data-active="${p.id}" aria-pressed="${p.active !== false}">In squad</button>
+        <button class="tg" data-del="${p.id}" aria-label="Remove ${esc(p.firstName)}" style="color:var(--err)">Remove</button></div></div>`).join('')}</div>`
+    : '<div class="panel center muted">No players yet.</div>'}
+    <form class="panel" id="addp"><h2>Add a player</h2>
+      <div class="row" style="margin-top:10px"><input id="pname" class="field grow" placeholder="First name" required><input id="pnum" class="field" style="width:90px" placeholder="No." inputmode="numeric"></div>
+      <button class="btn primary wide" style="margin-top:10px">Add player</button></form>`;
+}
+
+function seasonHTML() {
+  const a = awards(), rev = matches.filter(m => m.status === 'revealed');
+  if (!rev.length) return `<div class="panel center muted">Winners appear here once you've revealed the first one. Only you can see this page.</div>`;
+  const rows = byNum(players).map(p => ({ p, n: a[p.id] || 0 })).sort((x, y) => y.n - x.n);
+  return `<p class="muted">Only you can see this.</p>
+    <table><thead><tr><th>Player</th><th style="text-align:right">Awards</th></tr></thead><tbody>
+    ${rows.map(r => `<tr><td>${esc(r.p.firstName)}</td><td class="n">${r.n}</td></tr>`).join('')}</tbody></table>
+    <h3>Winners</h3><table><tbody>${rev.map(m => `<tr><td>${fmtDate(m.date)}</td><td>v ${esc(m.opponent)}</td><td><strong>${esc((P(m.winner.id) || m.winner).firstName)}</strong></td></tr>`).join('')}</tbody></table>`;
+}
+
+function settingsHTML() {
+  return `<form class="panel" id="settings"><h2>Team</h2>
+    <label class="lbl" for="tname">Team name</label><input id="tname" class="field" value="${esc(teamName)}" placeholder="e.g. FC Hanley U11 Sunday">
+    <label class="lbl" for="tcode">Team code</label><input id="tcode" class="field" value="${esc(teamCode)}" autocapitalize="characters" spellcheck="false" minlength="4" required placeholder="e.g. HANLEY26">
+    <p class="muted" style="font-size:14px">Parents type this once per phone. Pin it in the group rather than putting it next to the link.</p>
+    <button class="btn primary wide">Save</button><p class="err" id="err" role="alert"></p></form>
+  <div class="panel"><h2>Parents' link</h2><p><code>${esc(parentUrl())}</code></p><button class="btn wide" data-act="copylink">Copy link</button></div>
+  <div class="panel"><h2>Phones with access</h2><p class="muted">${memberCount === null ? '<button class="btn small" data-act="countmembers">Count them</button>' : memberCount + ' phone' + (memberCount === 1 ? '' : 's') + ' have entered the code.'}</p>
+    <p class="muted" style="font-size:14px">If the code gets shared too widely, change it above, then remove all phones. Parents re-enter the new code.</p>
+    <button class="btn danger wide" data-act="clearmembers">Remove all phones</button></div>
+  <button class="btn wide" style="margin-top:14px" data-act="signout">Sign out</button>`;
+}
+
+async function refreshCount() {
+  const m = matches[0], el = $('#votes');
+  if (!el || !m) return;
+  try { const c = await getCountFromServer(collection(db, 'matches', m.id, 'votes')); const n = c.data().count;
+    el.textContent = n + ' vote' + (n === 1 ? '' : 's') + ' in'; } catch (e) { el.textContent = 'Couldn\'t count votes'; }
+}
+
+/* ---------- actions ---------- */
+async function share(text) {
+  try { if (navigator.share) { await navigator.share({ text }); return; } } catch (e) { if (e.name === 'AbortError') return; }
+  try { await navigator.clipboard.writeText(text); toast('Copied, ready to paste in WhatsApp'); }
+  catch (e) { sheet(`<textarea class="field" rows="5" readonly>${esc(text)}</textarea><button class="btn wide" style="margin-top:10px" data-close="1">Close</button>`); }
+}
+
+async function startPick() {
+  const m = matches[0];
+  const vs = await getDocs(collection(db, 'matches', m.id, 'votes'));
+  const t = {}, comments = {};
+  vs.forEach(d => { const v = d.data(); t[v.playerId] = (t[v.playerId] || 0) + 1; if (v.comment) (comments[v.playerId] = comments[v.playerId] || []).push(v.comment); });
+  const tally = Object.entries(t).map(([id, votes]) => ({ id, votes })).sort((a, b) => b.votes - a.votes);
+  const tied = tally.length > 1 && tally[0].votes === tally[1].votes;
+  picking = { tally, total: vs.size, comments, chosen: tally.length && !tied ? tally[0].id : null };
+  render();
+}
+
+async function reveal() {
+  const m = matches[0], p = P(picking.chosen);
+  const cs = picking.comments[picking.chosen] || [];
+  const keep = cs.filter((c, i) => { const box = document.querySelector(`[data-cm="${i}"]`); return !box || box.checked; });
+  await updateDoc(doc(db, 'matches', m.id), {
+    status: 'revealed', revealedAt: serverTimestamp(),
+    winner: { id: p.id, firstName: p.firstName, number: p.number || '' }, winnerComments: keep
+  });
+  Object.assign(m, { status: 'revealed', winner: { id: p.id, firstName: p.firstName }, winnerComments: keep });
+  picking = null; render();
+  ask(`${esc(p.firstName)} is Player of the Match`, 'Parents will see it next time they open the link. Share the winner graphic to the group?', 'Share graphic', () => shareGraphic(m));
+}
+
+async function shareGraphic(m) {
+  const p = P(m.winner.id) || m.winner;
+  await document.fonts.ready;
+  const W = 1080, H = 1350, c = document.createElement('canvas'); c.width = W; c.height = H;
+  const x = c.getContext('2d');
+  for (let i = 0; i < 12; i++) { x.fillStyle = i % 2 ? '#297044' : '#2E7A4B'; x.fillRect(0, i * H / 12, W, H / 12 + 1); }
+  x.textAlign = 'center'; x.fillStyle = '#fff';
+  x.font = '600 48px "Barlow Condensed", sans-serif'; x.globalAlpha = .85; x.fillText(teamName || '', W / 2, 130); x.globalAlpha = 1;
+  x.font = '700 96px "Barlow Condensed", sans-serif'; x.fillText('Player of the Match', W / 2, 240);
+  const cx = W / 2, cy = 640, r = 300;
+  const g = x.createLinearGradient(cx - r, cy - r, cx + r, cy + r); g.addColorStop(0, '#F6CF63'); g.addColorStop(.5, '#E8A317'); g.addColorStop(1, '#B97C0A');
+  x.fillStyle = g; x.beginPath(); x.arc(cx, cy, r + 22, 0, Math.PI * 2); x.fill();
+  x.save(); x.beginPath(); x.arc(cx, cy, r, 0, Math.PI * 2); x.clip();
+  if (p.photo) { const img = new Image(); img.src = p.photo; await img.decode(); x.drawImage(img, cx - r, cy - r, r * 2, r * 2); }
+  else { x.fillStyle = '#1F5E3B'; x.fillRect(cx - r, cy - r, r * 2, r * 2); x.fillStyle = '#fff'; x.font = '700 300px "Barlow Condensed", sans-serif'; x.fillText((p.firstName || '?')[0], cx, cy + 105); }
+  x.restore();
+  x.fillStyle = '#fff'; x.font = '700 150px "Barlow Condensed", sans-serif'; x.fillText(p.firstName || '', W / 2, 1120);
+  x.font = '500 54px "Barlow", sans-serif'; x.globalAlpha = .9; x.fillText('v ' + (m.opponent || ''), W / 2, 1200);
+  const blob = await new Promise(res => c.toBlob(res, 'image/png'));
+  const file = new File([blob], `player-of-the-match-${(p.firstName || 'winner').toLowerCase()}.png`, { type: 'image/png' });
+  try { if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); return; } }
+  catch (e) { if (e.name === 'AbortError') return; }
+  const url = URL.createObjectURL(file), a = document.createElement('a'); a.href = url; a.download = file.name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+async function resizePhoto(file) {
+  const bmp = await createImageBitmap(file);
+  const side = Math.min(bmp.width, bmp.height), sx = (bmp.width - side) / 2, sy = Math.max(0, (bmp.height - side) * 0.3);
+  const c = document.createElement('canvas'); c.width = c.height = 360;
+  c.getContext('2d').drawImage(bmp, sx, sy, side, side, 0, 0, 360, 360);
+  return c.toDataURL('image/jpeg', 0.8);
+}
+
+document.addEventListener('click', async ev => {
+  const t = ev.target.closest('button,[data-close]'); if (!t) return;
+  const d = t.dataset;
+  try {
+    if (d.close && (t === ev.target || t.tagName === 'BUTTON')) return closeSheet();
+    if (d.tab) { tab = d.tab; picking = null; return render(); }
+    if (d.elig) return t.setAttribute('aria-pressed', t.getAttribute('aria-pressed') !== 'true');
+    if (d.choose) { picking.chosen = d.choose; return render(); }
+    if (d.consent) {
+      const p = P(d.consent), on = !p.consent;
+      if (!on && p.photo) return ask(`Remove ${esc(p.firstName)}'s photo?`, 'Turning off consent deletes the photo.', 'Remove photo', async () => {
+        await updateDoc(doc(db, 'players', p.id), { consent: false, photo: deleteField() }); p.consent = false; delete p.photo; render(); }, true);
+      await updateDoc(doc(db, 'players', p.id), { consent: on }); p.consent = on; return render();
+    }
+    if (d.photo) { photoFor = d.photo; return $('#photoFile').click(); }
+    if (d.active) { const p = P(d.active), on = p.active === false; await updateDoc(doc(db, 'players', p.id), { active: on }); p.active = on; return render(); }
+    if (d.del) { const p = P(d.del); return ask(`Remove ${esc(p.firstName)}?`, 'Their photo is deleted too. Past winners keep their name.', 'Remove player', async () => {
+      await deleteDoc(doc(db, 'players', p.id)); players = players.filter(x => x.id !== p.id); render(); }, true); }
+    const a = d.act; if (!a) return;
+    if (a === 'ok') { const f = pending; pending = null; closeSheet(); if (f) await f(); return; }
+    if (a === 'signout') { await signOut(auth); return; }
+    if (a === 'copyuid') return share(d.uid);
+    if (a === 'copylink') return share(parentUrl());
+    if (a === 'sharelink') { const m = matches[0];
+      return share(`Player of the Match v ${m.opponent}: vote here ${parentUrl()}\nVoting closes ${fmtClose(m.closesAt)}. Team code is in the pinned message.`); }
+    if (a === 'pickwinner') return startPick();
+    if (a === 'backpick') { picking = null; return render(); }
+    if (a === 'reveal') return reveal();
+    if (a === 'graphic') return shareGraphic(matches[0]);
+    if (a === 'cancelvote') return ask('Cancel this vote?', 'The vote and any votes cast are deleted. Parents see "No vote open yet".', 'Cancel vote', async () => {
+      const m = matches[0], vs = await getDocs(collection(db, 'matches', m.id, 'votes')), b = writeBatch(db);
+      vs.forEach(v => b.delete(v.ref)); b.delete(doc(db, 'matches', m.id)); await b.commit(); matches.shift(); render(); }, true);
+    if (a === 'countmembers') { const c = await getCountFromServer(collection(db, 'members')); memberCount = c.data().count; return render(); }
+    if (a === 'clearmembers') return ask('Remove all phones?', 'Every parent will need to type the team code again.', 'Remove all phones', async () => {
+      const ms = await getDocs(collection(db, 'members')); let b = writeBatch(db), n = 0;
+      for (const m of ms.docs) { b.delete(m.ref); if (++n % 450 === 0) { await b.commit(); b = writeBatch(db); } }
+      await b.commit(); memberCount = 0; render(); }, true);
+  } catch (e) { console.error(e); toast('That didn\'t save. Check your signal and try again.'); }
+});
+
+document.addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const f = ev.target;
+  try {
+    if (f.id === 'newvote') {
+      const opp = $('#opp').value.trim(), closes = new Date($('#closes').value);
+      const eligible = [...document.querySelectorAll('[data-elig][aria-pressed="true"]')].map(b => b.dataset.elig);
+      if (!opp) return;
+      if (!(closes > new Date())) { $('#err').textContent = 'Set a closing time in the future.'; return; }
+      if (eligible.length < 2) { $('#err').textContent = 'Put at least two players on the ballot.'; return; }
+      const data = { opponent: opp, date: $('#date').value, closesAt: Timestamp.fromDate(closes), status: 'open', eligible, createdAt: serverTimestamp() };
+      const ref = await addDoc(collection(db, 'matches'), data);
+      matches.unshift({ id: ref.id, ...data }); render();
+      ask('Voting is open', 'Share the link in the parents\' group now?', 'Share the vote link', () => share(`Player of the Match v ${opp}: vote here ${parentUrl()}\nVoting closes ${fmtClose(data.closesAt)}. Team code is in the pinned message.`));
+    }
+    if (f.id === 'addp') {
+      const name = $('#pname').value.trim(); if (!name) return;
+      const data = { firstName: name.split(/\s+/)[0], number: $('#pnum').value.trim(), consent: false, active: true };
+      const ref = await addDoc(collection(db, 'players'), data);
+      players.push({ id: ref.id, ...data }); render(); $('#pname').focus();
+    }
+    if (f.id === 'settings') {
+      const name = $('#tname').value.trim(), code = $('#tcode').value.trim().toUpperCase();
+      if (code.length < 4) { $('#err').textContent = 'Use at least 4 characters for the code.'; return; }
+      await setDoc(doc(db, 'config', 'team'), { name });
+      await setDoc(doc(db, 'private', 'settings'), { code });
+      teamName = name; teamCode = code; toast('Saved');
+      render();
+    }
+  } catch (e) { console.error(e); toast('That didn\'t save. Check your signal and try again.'); }
+});
+
+document.addEventListener('change', async ev => {
+  const t = ev.target;
+  try {
+    if (t.id === 'manual' && picking) { picking.chosen = t.value || null; return render(); }
+    if (t.dataset.edit) {
+      const p = P(t.dataset.id), k = t.dataset.edit, v = t.value.trim();
+      if (k === 'firstName' && !v) { t.value = p.firstName; return; }
+      await updateDoc(doc(db, 'players', p.id), { [k]: v }); p[k] = v;
+    }
+    if (t.id === 'photoFile' && t.files[0] && photoFor) {
+      const p = P(photoFor), file = t.files[0]; t.value = '';
+      const photo = await resizePhoto(file);
+      await updateDoc(doc(db, 'players', p.id), { photo }); p.photo = photo; photoFor = null; render();
+    }
+  } catch (e) { console.error(e); toast('That didn\'t save. Check your signal and try again.'); }
+});
+</script>
+</body>
+</html>
