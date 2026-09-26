@@ -4,7 +4,7 @@ service cloud.firestore {
 
     // 1. Sign in to admin.html once, copy the ID it shows you, paste it here, then deploy.
     function isAdmin() {
-      return request.auth != null && request.auth.uid in ['PASTE_YOUR_ADMIN_UID'];
+      return request.auth != null && request.auth.uid in ['3niqIyFDzJYDWuJrblcKc9lhzZj1'];
     }
     function signedIn() { return request.auth != null; }
     function isMember() {
