@@ -49,7 +49,6 @@ service cloud.firestore {
       match /votes/{uid} {
         allow create: if isMember() && request.auth.uid == uid
           && matchDoc(mid).status == 'open'
-          && request.time < matchDoc(mid).closesAt
           && request.resource.data.keys().hasOnly(['playerId', 'comment', 'at'])
           && request.resource.data.playerId in matchDoc(mid).eligible
           && request.resource.data.comment is string

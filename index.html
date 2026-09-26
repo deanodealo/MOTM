@@ -104,7 +104,7 @@ async function route() {
       <p class="muted">Voting opens after the match. Use the link again when it goes in the group.</p></div>`);
   }
   if (match.status === 'revealed') return showReveal();
-  const open = match.status === 'open' && match.closesAt && match.closesAt.toMillis() > Date.now();
+     const open = match.status === 'open';
   if (!open) {
     return view(`${top()}<div class="panel center"><h2>Voting has closed</h2>
       <p class="muted">The winner will be revealed here soon.</p></div>`);
@@ -120,7 +120,7 @@ function showVote() {
   const ballot = (match.eligible || []).map(id => players.find(p => p.id === id)).filter(Boolean)
     .sort((a, b) => (parseInt(a.number) || 999) - (parseInt(b.number) || 999) || a.firstName.localeCompare(b.firstName));
   view(`${top()}
-    <p class="lead">Tap the player you think was best today. Voting closes ${esc(fmtClose(match.closesAt))}.</p>
+    <p class="lead">Tap the player you think was best today.    Voting closes at the end of the game.</p>
     <div class="grid" id="grid">${ballot.map(p => `<button class="card" data-pick="${p.id}" aria-pressed="false">
       ${p.number ? `<span class="no">${esc(p.number)}</span>` : ''}${face(p)}<span class="nm">${esc(p.firstName)}</span></button>`).join('')}</div>
     <form class="panel" id="vote" hidden>
@@ -164,7 +164,7 @@ function showVoted(pid) {
   const p = players.find(x => x.id === pid);
   view(`${top()}<div class="panel center"><div class="tick" aria-hidden="true">✓</div>
     <h2>Your vote for ${esc(p ? p.firstName : 'your player')} is in</h2>
-    <p class="muted">The winner is revealed here after voting closes ${esc(fmtClose(match.closesAt))}.</p></div>`);
+    <p class="muted">The winner is revealed here once voting closes after the game.</p></div>`);
 }
 
 /* ---------- reveal ---------- */
